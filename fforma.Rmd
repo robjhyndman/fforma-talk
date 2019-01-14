@@ -1,0 +1,608 @@
+---
+title: "Feature-based forecasting algorithms for large collections of time series"
+author: "Rob J Hyndman"
+date: "25 January 2019"
+abstract: "I will discuss two algorithms used in forecasting large collections of diverse time series. Each of these algorithms uses a meta-learning approach with vectors of features computed from  time series to guide the way the forecasts are computed. In FFORMS (Feature-based FORecast Model Selection), we use a random forest classifier to identify the best forecasting method using only time series features. A key advantage of our proposed framework is that the time-consuming process of building a classifier is handled in advance of the forecasting task at hand, and only the selected forecasting model needs to be computed in real time. In FFORMA (Feature-based FORecast Model Averaging), we use gradient boosting to obtain the weights for forecast combinations using as inputs only a vector of time series features. This is slower than FFORMS (because forecasts from all candidate models must be computed), but it provides substantially more accurate forecasts. Both approaches perform very well compared to competitive methods in large forecasting competitions, with FFORMA achieving 2nd place in the recent M4 forecasting competition."
+fontsize: 14pt
+titlefontsize: 22pt
+output:
+  binb::monash:
+    fig_height: 5
+    fig_width: 8
+    highlight: tango
+    incremental: no
+    keep_tex: no
+    includes:
+      in_header: preamble.tex
+colortheme: monashblue
+toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE, cache = TRUE,
+  dev.args = list(bg = grey(0.9), pointsize = 11)
+)
+library(Mcomp)
+library(GGally)
+library(tsfeatures)
+library(tidyverse)
+source("functions.R")
+source("ggbiplot.R")
+set.seed(20180605)
+options(digits = 3, width = 63)
+```
+
+# Time series features
+
+## M3 competition
+\full{M3paper}
+\only<2>{
+\placefig{1}{4}{height=3cm, width=10cm, keepaspectratio=true}{SMakridakis}
+\placefig{8.8}{4}{height=3cm, width=10cm, keepaspectratio=true}{MHibon}}
+
+```{r scalem3}
+scalem3 <- list()
+for (i in 1:3003)
+{
+  scalem3[[i]] <- M3[[i]]$x - min(M3[[i]]$x)
+  scalem3[[i]] <- as.numeric(scalem3[[i]] / max(scalem3[[i]]))
+}
+```
+
+## Key idea
+\placefig{9.1}{.5}{width=3.6cm}{tukey}
+\begin{textblock}{3}(9.7,5.4)\small\textit{John W Tukey}\end{textblock}
+\begin{textblock}{8}(0.7,1.2)
+\begin{alertblock}{Cognostics}
+Computer-produced diagnostics\\ (Tukey and Tukey, 1985).
+\end{alertblock}
+\end{textblock}\pause
+\vspace*{2.5cm}
+
+\alert{Examples for time series}
+
+  * lag correlation
+  * size and direction of trend
+  * strength of seasonality
+  * timing of peak seasonality
+  * spectral entropy
+
+\vspace*{0.3cm}
+\begin{block}{}
+Called ``features'' in the machine learning literature.
+\end{block}
+
+## An STL decomposition: N2096
+\begin{alertblock}{}
+\centerline{$Y_t = S_t + T_t + R_t$\qquad $S_{t}$ is periodic with mean 0}
+\end{alertblock}
+
+```{r stl, fig.height=4.7}
+forecast::mstl(M3[["N2096"]]$x) %>%
+  autoplot() + ylab("") + xlab("") +
+  scale_x_continuous(breaks = seq(1982, 1992, by = 1), minor_breaks = NULL)
+```
+
+## Candidate features
+
+\begin{block}{STL decomposition}
+\centerline{$Y_t = S_t + T_t + R_t$}
+\end{block}\pause\fontsize{14}{16}\sf\vspace*{-0.2cm}
+
+* Seasonal period
+* Autocorrelations of data ($Y_1,\dots,Y_T$)
+* Autocorrelations of data ($R_1,\dots,R_T$)
+* Strength of seasonality: $\max\left(0,1 - \frac{\Var(R_t)}{\Var(Y_t-T_t)}\right)$
+* Strength of trend:  $\max\left(0,1 - \frac{\Var(R_t)}{\Var(Y_t-S_t)}\right)$
+* Spectral entropy: $H = - \int_{-\pi}^{\pi} f_y(\lambda) \log f_y(\lambda) d\lambda$, where $f_y(\lambda)$ is spectral density of $Y_t$.\newline
+Low values of $H$ suggest a time series that is easier to forecast (more signal).
+* Optimal Box-Cox transformation of data
+
+```{r M3data, include=FALSE}
+M3data <- purrr::map(
+  Mcomp::M3,
+  function(x) {
+    tspx <- tsp(x$x)
+    ts(c(x$x, x$xx), start = tspx[1], frequency = tspx[3])
+  }
+)
+```
+
+\fontsize{9}{10}\sf
+
+```{r M3Features, include=FALSE, dependson="M3data"}
+lambda_stl <- function(x, ...) {
+  lambda <- forecast::BoxCox.lambda(x, lower = 0, upper = 1, method = "loglik")
+  y <- forecast::BoxCox(x, lambda)
+  c(stl_features(y, s.window = "periodic", robust = TRUE, ...),
+    lambda = lambda
+  )
+}
+M3Features <- bind_cols(
+  tsfeatures(M3data, c("frequency", "entropy")),
+  tsfeatures(M3data, "lambda_stl", scale = FALSE)
+) %>%
+  select(frequency, entropy, trend, seasonal_strength, e_acf1, lambda) %>%
+  replace_na(list(seasonal_strength = 0)) %>%
+  dplyr::rename(
+    Frequency = frequency,
+    Entropy = entropy,
+    Trend = trend,
+    Season = seasonal_strength,
+    ACF1 = e_acf1,
+    Lambda = lambda
+  ) %>%
+  mutate(Period = as.factor(Frequency))
+```
+
+```{r M3examples, include=FALSE, dependson="M3Features"}
+# Consider only long series
+n <- unlist(lapply(M3, function(x) {
+  x$n
+}))
+M3Featureslong <- M3Features[n > 50, ]
+M3long <- M3[names(M3)[n > 50]]
+fnames <- c("M3Freq", "M3spec", "M3trend", "M3season", "M3acf", "M3lambda")
+k <- NROW(M3Featureslong)
+for (i in 1:6)
+{
+  j <- order(M3Featureslong[[i]])
+  savepdf(paste(fnames[i], "Lo", sep = ""), width = 20, height = 7)
+  print(autoplot(M3long[[j[1]]]$x) +
+    ylab(M3long[[j[1]]]$sn) + xlab(""))
+  endpdf()
+  savepdf(paste(fnames[i], "Hi", sep = ""), width = 20, height = 7)
+  print(autoplot(M3long[[j[k]]]$x) +
+    ylab(M3long[[j[k]]]$sn) + xlab(""))
+  endpdf()
+}
+```
+
+## Distribution of Period for M3
+
+```{r M3period, dependson="M3Features"}
+ggally_barDiag(M3Features,
+  mapping = aes(Period), width = 0.2,
+  colour = "#cc5900", fill = "#cc5900"
+)
+```
+
+## Distribution of Seasonality for M3
+
+```{r M3season, dependson="M3Features"}
+gghist(M3Features, aes_string("Season"))
+```
+
+\only<2->{
+\begin{textblock}{6}(0.2,3)
+  \begin{alertblock}{Low Seasonality}
+    \includegraphics[width=6cm]{M3seasonLo.pdf}
+  \end{alertblock}
+\end{textblock}
+}
+\only<3>{
+\begin{textblock}{6}(6.6,3)
+  \begin{alertblock}{High Seasonality}
+    \includegraphics[width=6cm]{M3seasonHi.pdf}
+  \end{alertblock}
+\end{textblock}
+}
+
+## Distribution of Trend for M3
+
+```{r M3trend, dependson="M3Features"}
+gghist(M3Features, aes_string("Trend"))
+```
+
+\only<2->{
+\begin{textblock}{6}(0.2,3)
+  \begin{alertblock}{Low Trend}
+    \includegraphics[width=6cm]{M3trendLo.pdf}
+  \end{alertblock}
+\end{textblock}
+}
+\only<3>{
+\begin{textblock}{6}(6.6,3)
+  \begin{alertblock}{High Trend}
+    \includegraphics[width=6cm]{M3trendHi.pdf}
+  \end{alertblock}
+\end{textblock}
+}
+
+## Distribution of Residual ACF1 for M3
+
+```{r M3ACF1, dependson="M3Features"}
+gghist(M3Features, aes_string("ACF1"))
+```
+
+\only<2->{
+\begin{textblock}{6}(0.2,3)
+  \begin{alertblock}{Low ACF1}
+    \includegraphics[width=6cm]{M3acfLo.pdf}
+  \end{alertblock}
+\end{textblock}
+}
+\only<3>{
+\begin{textblock}{6}(6.6,3)
+  \begin{alertblock}{High ACF1}
+    \includegraphics[width=6cm]{M3acfHi.pdf}
+  \end{alertblock}
+\end{textblock}
+}
+
+## Distribution of Spectral Entropy for M3
+
+```{r M3entropy, dependson="M3Features"}
+gghist(M3Features, aes_string("Entropy"))
+```
+
+\only<2->{
+\begin{textblock}{6}(0.2,3)
+  \begin{alertblock}{Low Entropy}
+    \includegraphics[width=6cm]{M3specLo.pdf}
+  \end{alertblock}
+\end{textblock}
+}
+\only<3>{
+\begin{textblock}{6}(6.6,3)
+  \begin{alertblock}{High Entropy}
+    \includegraphics[width=6cm]{M3specHi.pdf}
+  \end{alertblock}
+\end{textblock}
+}
+
+## Feature distributions
+
+```{r ACF1SE, dependson="M3Features"}
+ggplot(M3Features, aes(x = Entropy, y = ACF1)) + geom_point()
+```
+
+## Feature distributions
+
+```{r TrendSE, dependson="M3Features"}
+ggplot(M3Features, aes(x = Entropy, y = Trend)) + geom_point()
+```
+
+## Feature distributions
+
+```{r M3pairs, dependson="M3Features"}
+# Fig 1 of paper
+yk_ggally_densityDiag <- wrap(gghist, adjust = 0.5)
+yk_ggally_barDiag <- wrap(ggally_barDiag,
+  colour = "#cc5900",
+  fill = "#cc5900", width = 0.2
+)
+M3Features %>%
+  select(Period, Entropy, Trend, Season, ACF1, Lambda) %>%
+  ggpairs(
+    diag = list(
+      continuous = yk_ggally_densityDiag,
+      discrete = yk_ggally_barDiag
+    ),
+    axisLabels = "none",
+    lower = list(continuous = wrap("points", alpha = 0.5, size = 0.2))
+  ) -> p
+print(p)
+savepdf("PairwisePlot")
+print(p)
+endpdf()
+```
+
+## Dimension reduction for time series
+
+```{r m3sample, include=FALSE, dependson='scalem3'}
+j <- sample(1:3003, 100)
+ncol <- 5
+n <- length(j)
+savepdf("M3sample")
+plot(0, 0, ylim = c(0, n / ncol), xlim = c(0, ncol * 1.2), yaxt = "n", xaxt = "n", ylab = "", xlab = "", bty = "n", type = "n")
+for (i in 1:n)
+  lines(
+    (1:length(scalem3[[j[i]]])) / length(scalem3[[j[i]]]) + ((i - 1) %% ncol) * 1.1,
+    scalem3[[j[i]]] + trunc((i - 1) / ncol)
+  )
+endpdf()
+```
+
+```{r m3pca, dependson="M3Features"}
+# 2-d Feature space (Top of Fig 2)
+prcomp(select(M3Features, -Period), scale = TRUE)$x %>%
+  as_tibble() %>%
+  bind_cols(M3Features) %>%
+  ggplot(aes(x = PC1, y = PC2)) +
+  coord_equal(ratio = 1) +
+  geom_point() -> p
+savepdf("FeatureSpace", height = 13, width = 13)
+print(p)
+endpdf()
+```
+
+\only<1->{\placefig{0}{1}{width=4cm,height=8.3cm,trim=0 0 200 0,clip=TRUE}{M3sample}}
+\only<2->{\placefig{6}{1}{width=6cm}{PairwisePlot}}
+\only<3>{\placefig{5.2}{5.3}{width=5cm}{FeatureSpace}}
+
+\only<2->{\placefig{4}{2}{width=2cm}{arrow}}
+\only<3>{\placefig{8.4}{4.2}{width=2cm,angle=-90}{arrow}}
+
+\only<2->{\begin{textblock}{2.1}(4,2.6)
+\begin{alertblock}{}\small
+Feature calculation
+\end{alertblock}
+\end{textblock}}
+
+\only<3->{\begin{textblock}{2.8}(9.7,4.1)
+\begin{alertblock}{}\small
+Principal component decomposition
+\end{alertblock}
+\end{textblock}}
+
+## M3 feature space
+\fontsize{11}{11}\sf
+
+\vspace*{-0.2cm}
+
+\includegraphics[width=8.2cm]{FeatureSpace}
+
+\begin{textblock}{4}(8,3)
+\begin{block}{}\fontsize{12}{13}\sf
+First two PCs explain 58.5\% of the variance.
+\end{block}
+\end{textblock}
+
+## M3 feature space
+
+```{r m3biplot, dependson="M3Features",fig.width=5.3,fig.height=4.5}
+prcomp(select(M3Features, -Period), scale = TRUE) %>%
+  ggbiplot(alpha = 0.2, scale = 0) + coord_equal(ratio = 1)
+```
+
+## M3 feature space
+
+```{r m3pca1, dependson="m3pca", fig.width=6, fig.height=4.5}
+p + geom_point(aes(col = Period)) +
+  coord_equal(ratio = 1)
+```
+
+## Feature properties
+
+In this analysis, we have restricted features to be
+
+ * ergodic
+ * scale-independent
+
+For other analyses, it may be appropriate to have different requirements.
+
+## R package: tsfeatures
+
+\alert{github.com/robjhyndman/tsfeatures}\fontsize{9.5}{11}\sf
+
+```r
+library(tsfeatures)
+library(tidyverse)
+library(forecast)
+
+myfeatures <- function(x,...) {
+  lambda <- BoxCox.lambda(x, lower=0, upper=1, method='loglik')
+  y <- BoxCox(x, lambda)
+  c(stl_features(y,s.window='periodic', robust=TRUE, ...),
+  	lambda=lambda)
+}
+M3Features <- bind_cols(
+  tsfeatures(M3data, c("frequency", "entropy")),
+  tsfeatures(M3data, "myfeatures", scale=FALSE))
+```
+
+# FFORMS: Feature-based forecast model selection
+
+## \fontsize{15}{15}\bf\sffamily FFORMS: Feature-based FORecast Model Selection
+
+\alert{Features used to select a forecasting model}\vspace*{10cm}
+
+\begin{textblock}{12}(0.1,2.1)\small
+\begin{multicols}{2}
+  \begin{itemize}\tightlist
+    \item length
+    \item strength of seasonality
+    \item strength of trend
+    \item linearity
+    \item curvature
+    \item spikiness
+    \item stability
+    \item lumpiness
+    \item first ACF value of remainder series
+    \item parameter estimates of Holt's linear trend method
+    \item spectral entropy
+    \item Hurst exponent
+    \item nonlinearity
+    \item parameter estimates of Holt-Winters' additive method
+    \item unit root test statistics
+    \item first ACF value of residual series of linear trend model
+    \item ACF and PACF based features - calculated on both the raw and differenced series
+    \end{itemize}
+\end{multicols}
+\end{textblock}
+
+## \fontsize{15}{15}\bf\sffamily FFORMS: Feature-based FORecast Model Selection
+
+\only<1>{\full{fw1}}
+\only<2>{\full{fw2}}
+\only<3>{\full{fw3}}
+\only<4>{\full{fw4}}
+\only<5>{\full{fw5}}
+\only<6>{\full{fw6}}
+\only<7>{\full{fw7}}
+\only<8>{\full{fw8}}
+\only<9>{\full{fw9}}
+\only<10>{\full{fw10}}
+\only<11>{\full{fw11}}
+\only<12>{\full{fw12}}
+\only<13>{\full{fw13}}
+\only<14>{\full{fw14}}
+
+\vspace*{10cm}
+
+## Application to M competition data
+
+\begin{block}{Experiment 1}
+\centering\small\tabcolsep=0.1cm
+\begin{tabular}{lrrrrr}
+                 & Source & Y      & Q      & M \\
+\midrule
+Observed series  & M1     & 181    & 203    & 617 \\
+Simulated series &        & 362000 & 406000 & 123400 \\
+New series       & M3     & 645    & 756    & 1428
+\end{tabular}
+\end{block}
+\begin{block}{Experiment 2}
+\centering\small\tabcolsep=0.1cm
+\begin{tabular}{lrrrrr}
+                 & Source & Y       & Q       & M \\
+\midrule
+Observed series  & M3     & 645     & 756     & 1428 \\
+Simulated series &        & 1290000 & 1512000 & 285600 \\
+New series       & M1     & 181     & 203     & 617
+\end{tabular}
+\end{block}
+
+
+## Results: Yearly
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+method <- c(
+  "RF-unbalanced", "RF-class priors", "auto.arima", "ets", "WN", "RW", "RWD", "Theta",
+  "RF-unbalanced", "RF-class priors", "auto.arima", "ets", "WN", "RW", "RWD", "Theta"
+)
+Rank <- c(
+  1.50, 1.50, 3.33, 5.00, 8.00, 7.00, 3.67, 6.00,
+  3.50, 2.50, 5.83, 4.67, 9.00, 8.00, 1.00, 3.50
+)
+class <- c(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1)
+df <- data.frame(method = method, Rank = Rank, class = class)
+ggplot(data = df, aes(x = method, y = Rank, fill = factor(class))) +
+  geom_bar(position = "dodge", stat = "identity") +
+  coord_flip() +
+  scale_x_discrete(
+    limits = c("WN", "RW", "auto.arima", "ets", "Theta", "RWD", "RF-class priors", "RF-unbalanced"),
+    labels = c("WN", "RW", "auto.arima", "ets", "Theta", "RWD", "RF-class priors", "RF-unbalanced")
+  ) + scale_fill_brewer(
+    breaks = c(1, 0),
+    labels = c("Experiment 1 (new: M3)", "Experiment 2 (new: M1)")
+    , palette = "Set1"
+  ) +
+  theme(
+    axis.title.y = element_blank(), legend.title = element_blank(),
+    text = element_text(size = 20)
+  )
+```
+
+## Results: Quarterly
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+library(ggplot2)
+method <- c(
+  "RF-unbalanced", "RF-class priors", "auto.arima", "ets", "WN", "RW", "RWD", "STL-AR", "Theta", "Snaive",
+  "RF-unbalanced", "RF-class priors", "auto.arima", "ets", "WN", "RW", "RWD", "STL-AR", "Theta", "Snaive"
+)
+Rank <- c(
+  1.00, 2.63, 5.25, 3.00, 10.00, 7.50, 5.38, 8.63, 3.88, 7.75, 2.25,
+  3.13, 4.75, 3.75, 10.00, 7.00, 6.50, 8.34, 2.50, 6.75
+)
+class <- c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+df <- data.frame(method = method, Rank = Rank, class = class)
+ggplot(data = df, aes(x = method, y = Rank, fill = factor(class))) +
+  geom_bar(position = "dodge", stat = "identity") +
+  coord_flip() +
+  scale_x_discrete(
+    limits = c("WN", "RW", "RWD", "STL-AR", "Snaive", "auto.arima", "ets", "Theta", "RF-class priors", "RF-unbalanced"),
+    labels = c("WN", "RW", "RWD", "STL-AR", "Snaive", "auto.arima", "ets", "Theta", "RF-class priors", "RF-unbalanced")
+  ) + scale_fill_brewer(
+    breaks = c(1, 0),
+    labels = c("Experiment 1 (new: M3)", "Experiment 2 (new: M1)")
+    , palette = "Set1"
+  ) +
+  theme(
+    axis.title.y = element_blank(), legend.title = element_blank(),
+    text = element_text(size = 20)
+  )
+```
+
+## Results: Monthly
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+library(ggplot2)
+method <- c(
+  "RF-unbalanced", "RF-class priors", "auto.arima", "ets", "WN", "RW", "RWD", "STL-AR", "Theta", "Snaive",
+  "RF-unbalanced", "RF-class priors", "auto.arima", "ets", "WN", "RW", "RWD", "STL-AR", "Theta", "Snaive"
+)
+Rank <- c(1.77, 2.83, 4.94, 3.44, 10.00, 7.25, 8.61, 7.38, 2.27, 6.47, 3.22, 2.00, 2.83, 2.72, 10.00, 8.03, 6.89, 7.89, 4.22, 7.19)
+class <- c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+df <- data.frame(method = method, Rank = Rank, class = class)
+ggplot(data = df, aes(x = method, y = Rank, fill = factor(class))) +
+  geom_bar(position = "dodge", stat = "identity") +
+  coord_flip() +
+  scale_x_discrete(
+    limits = c("WN", "RW", "RWD", "STL-AR", "Snaive", "auto.arima", "ets", "Theta", "RF-class priors", "RF-unbalanced"),
+    labels = c("WN", "RW", "RWD", "STL-AR", "Snaive", "auto.arima", "ets", "Theta", "RF-class priors", "RF-unbalanced")
+  ) + scale_fill_brewer(
+    breaks = c(1, 0),
+    labels = c("Experiment 1 (new: M3)", "Experiment 2 (new: M1)")
+    , palette = "Set1"
+  ) +
+  theme(
+    axis.title.y = element_blank(), legend.title = element_blank(),
+    text = element_text(size = 20)
+  )
+```
+
+
+# FFORMA: Feature-based forecast model averaging
+
+## \fontsize{15}{15}\bf\sffamily FFORMA: Feature-based FORecast Model Averaging
+
+ * Like FFORMS but we use xgboost rather than a random forest.
+ * The optimization criterion is forecast accuracy not classification accuracy.
+ * The probability of each model being best is used to construct a model weight.
+ * A combination forecast is produced using these weights.
+ * \alert{Came second in the M4 competition}
+
+## \fontsize{15}{15}\bf\sffamily FFORMA: Feature-based FORecast Model Averaging
+
+### Models included
+
+1. Naive
+1. Seasonal naive
+1. Random walk with drift
+1. Theta method
+1. ARIMA
+1. ETS
+1. TBATS
+1. STLM-AR
+
+
+## R Packages
+\fontsize{14.5}{19}\sf
+
+ * \alert{seer}: FFORMS --- selecting forecasting model using features. \newline\url{github.com/thiyangt/seer}\vspace*{0.5cm}
+
+ * \alert{M4metalearning}: FFORMA -- forecast combinations using features to choose weights. \newline\url{github.com/robjhyndman/M4metalearning}
+
+
+## Acknowledgements
+
+\begin{textblock}{12.5}(0.2,1.2)
+\begin{block}{}\fontsize{9}{10}\sf
+\centering\begin{tabular}{p{3.4cm}p{3.4cm}p{3.4cm}}
+\includegraphics[height=3.4cm, width=10cm, keepaspectratio]{kate} &
+\includegraphics[height=3.4cm, width=10cm, keepaspectratio]{yanfei}&
+\includegraphics[height=3.4cm, width=10cm, keepaspectratio]{earowang} \\
+Kate Smith-Miles & Yanfei Kang & Earo Wang \\
+\includegraphics[height=3.4cm, width=10cm, keepaspectratio]{thiyanga} &
+\includegraphics[height=3.4cm, width=10cm, keepaspectratio]{george} &
+\includegraphics[height=3.4cm, width=10cm, keepaspectratio]{pablo} \\
+Thiyanga Talagala & George Athanasopoulos & Pablo \rlap{Montero-Manso}
+\end{tabular}
+\end{block}
+\end{textblock}
+
+
