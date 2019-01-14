@@ -12,7 +12,7 @@ Both approaches perform very well compared to competitive methods in large forec
 
 ### R packages:
 
-  * [tsfeatures](https://github.com/robjhyndman/tsfeatures)
+  * [tsfeatures](https://pkg.robjhyndman.com/tsfeatures)
   * [seer](https://github.com/thiyangt/seer)
   * [M4metalearning](https://github.com/robjhyndman/M4metalearning)
 
