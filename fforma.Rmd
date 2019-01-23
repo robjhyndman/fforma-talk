@@ -423,6 +423,16 @@ M3Features <- bind_cols(
 \end{multicols}
 \end{textblock}
 
+
+## \fontsize{15}{15}\bf\sffamily FFORMS: Feature-based FORecast Model Selection
+
+\alert{Why these features?}
+
+ * Hyndman, Wang and Laptev. “Large scale unusual time series detection” (ICDM 2015).
+ * Kang, Hyndman & Smith-Miles. “Visualising forecasting algorithm performance using time series instance spaces” (IJF 2017).
+ * Talagala, Hyndman and Athanasopoulos. “Meta-learning how to forecast time series” (2018).
+ * Implemented in the tsfeatures R package
+
 ## \fontsize{15}{15}\bf\sffamily FFORMS: Feature-based FORecast Model Selection
 
 \only<1>{\full{fw1}}
@@ -555,6 +565,8 @@ ggplot(data = df, aes(x = method, y = Rank, fill = factor(class))) +
   )
 ```
 
+# M4 Competition
+
 
 # FFORMA: Feature-based forecast model averaging
 
@@ -568,6 +580,18 @@ ggplot(data = df, aes(x = method, y = Rank, fill = factor(class))) +
 
 ## \fontsize{15}{15}\bf\sffamily FFORMA: Feature-based FORecast Model Averaging
 
+\placefig{0.2}{1.4}{width=12.4cm, trim=0 0 0 70, clip=true}{fforma_graphic}
+
+
+\vspace*{5.2cm}
+
+### Results
+2nd according to average OWA: 0.838\newline
+1st: 0.821\newline
+3rd: 0.841
+
+## \fontsize{15}{15}\bf\sffamily FFORMA: Feature-based FORecast Model Averaging
+
 ### Models included
 
 1. Naive
@@ -577,7 +601,30 @@ ggplot(data = df, aes(x = method, y = Rank, fill = factor(class))) +
 1. ARIMA
 1. ETS
 1. TBATS
-1. STLM-AR
+1. STL decomposition with AR for seasonally adjusted series
+1. Neural network autoregression
+
+
+## \fontsize{15}{15}\bf\sffamily FFORMA: Feature-based FORecast Model Averaging
+
+Weights for the combination:
+
+ * A **decision tree model** generates the weights using xgboost.
+ * The model is trained on a temporal holdout version of the M4 dataset, where the test sets are equal to the required forecast horizons.
+
+## \fontsize{15}{15}\bf\sffamily FFORMA: Feature-based FORecast Model Averaging
+
+
+
+## \fontsize{15}{15}\bf\sffamily FFORMA: Feature-based FORecast Model Averaging
+
+\only<1>{\placefig{0.2}{1.4}{width=12.4cm, trim=0 0 0 0, clip=true}{prototypes}}
+\only<2>{\placefig{0.2}{1.4}{width=12.4cm, trim=0 0 0 0, clip=true}{prototype1}}
+\only<3>{\placefig{0.2}{1.4}{width=12.4cm, trim=0 0 0 0, clip=true}{prototype2}}
+\only<4>{\placefig{0.2}{1.4}{width=12.4cm, trim=0 0 0 0, clip=true}{prototype3}}
+\only<5>{\placefig{0.2}{1.4}{width=12.4cm, trim=0 0 0 0, clip=true}{prototype4}}
+\only<6>{\placefig{0.2}{1.4}{width=12.4cm, trim=0 0 0 0, clip=true}{prototype5}}
+
 
 
 ## R Packages
